@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# Terraform / IaC future use
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Kubernetes secrets
+*secret*.yaml
+*secrets*.yaml
+
+# AWS
+.aws/
