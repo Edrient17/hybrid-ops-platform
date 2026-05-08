@@ -1,0 +1,556 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Hybrid Ops Platform - Incident automation.
+  This stack creates CloudWatch Alarms, EventBridge rule, Lambda functions,
+  and S3 bucket for incident event archiving and LLM-based incident summary generation.
+  It supports both ALB Target 5XX incidents and hybrid Internal Ops API call failures.
+  S3 ObjectCreated trigger for the summary Lambda should be added manually
+  from the AWS Console to avoid CloudFormation circular dependency issues.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: hybrid-ops
+    Description: Project name prefix for AWS resources.
+
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+    Description: Environment name.
+
+  AlbFullName:
+    Type: String
+    Description: >
+      ALB full name for CloudWatch metric dimension.
+      Example: app/hybrid-ops-dev-alb/xxxxxxxxxxxxxxxx
+
+  TargetGroupFullName:
+    Type: String
+    Description: >
+      Target group full name for CloudWatch metric dimension.
+      Example: targetgroup/hybrid-ops-dev-tg/xxxxxxxxxxxxxxxx
+
+  PublicWebLogGroupName:
+    Type: String
+    Default: /ecs/hybrid-ops-dev-public-web-app
+    Description: CloudWatch Logs log group name for the ECS Public Web App.
+
+  AlarmThreshold:
+    Type: Number
+    Default: 1
+    Description: Number of target 5XX responses within one period to trigger alarm.
+
+  AlarmPeriodSeconds:
+    Type: Number
+    Default: 60
+    Description: CloudWatch alarm evaluation period in seconds.
+
+  OpenAIModel:
+    Type: String
+    Default: gpt-4.1-mini
+    Description: OpenAI model name used by the incident summary Lambda.
+
+Resources:
+  # ------------------------------------------------------------
+  # S3 bucket for incident event archive and generated summaries
+  # ------------------------------------------------------------
+  IncidentArchiveBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireIncidentObjectsAfter30Days
+            Status: Enabled
+            ExpirationInDays: 30
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ------------------------------------------------------------
+  # IAM role for both Lambda functions
+  # ------------------------------------------------------------
+  IncidentLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${EnvironmentName}-incident-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub "${ProjectName}-${EnvironmentName}-incident-lambda-policy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: WriteLambdaLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+              - Sid: ReadAndWriteIncidentObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource:
+                  - !Sub "${IncidentArchiveBucket.Arn}/incidents/*"
+                  - !Sub "${IncidentArchiveBucket.Arn}/summaries/*"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ------------------------------------------------------------
+  # Lambda A - Archive CloudWatch alarm event to S3
+  # ------------------------------------------------------------
+  IncidentEventHandlerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-${EnvironmentName}-incident-event-handler"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt IncidentLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          INCIDENT_BUCKET: !Ref IncidentArchiveBucket
+          PROJECT_NAME: !Ref ProjectName
+          ENVIRONMENT_NAME: !Ref EnvironmentName
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import boto3
+          from datetime import datetime, timezone
+
+          s3 = boto3.client("s3")
+
+
+          def handler(event, context):
+              bucket = os.environ["INCIDENT_BUCKET"]
+
+              now = datetime.now(timezone.utc)
+              timestamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+              date_prefix = now.strftime("%Y/%m/%d")
+
+              detail = event.get("detail", {})
+              alarm_name = detail.get("alarmName", "unknown-alarm")
+              state = detail.get("state", {})
+              new_state = state.get("value", "UNKNOWN")
+
+              incident = {
+                  "project": os.environ.get("PROJECT_NAME", "hybrid-ops"),
+                  "environment": os.environ.get("ENVIRONMENT_NAME", "dev"),
+                  "received_at": timestamp,
+                  "source": event.get("source"),
+                  "detail_type": event.get("detail-type"),
+                  "alarm_name": alarm_name,
+                  "new_state": new_state,
+                  "region": event.get("region"),
+                  "account": event.get("account"),
+                  "raw_event": event
+              }
+
+              safe_alarm_name = alarm_name.replace("/", "-").replace(" ", "-")
+              key = f"incidents/{date_prefix}/{timestamp}-{safe_alarm_name}.json"
+
+              s3.put_object(
+                  Bucket=bucket,
+                  Key=key,
+                  Body=json.dumps(incident, ensure_ascii=False, indent=2).encode("utf-8"),
+                  ContentType="application/json"
+              )
+
+              print(json.dumps({
+                  "message": "Incident event archived",
+                  "bucket": bucket,
+                  "key": key,
+                  "alarm_name": alarm_name,
+                  "new_state": new_state
+              }))
+
+              return {
+                  "statusCode": 200,
+                  "body": json.dumps({
+                      "bucket": bucket,
+                      "key": key
+                  })
+              }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ------------------------------------------------------------
+  # Lambda B - Generate LLM-based incident summary from S3 JSON
+  # ------------------------------------------------------------
+  IncidentSummaryFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-${EnvironmentName}-incident-summary-handler"
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt IncidentLambdaRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          OPENAI_MODEL: !Ref OpenAIModel
+          SUMMARY_OUTPUT_PREFIX: summaries/
+      Code:
+        ZipFile: |
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+          from datetime import datetime, timezone
+
+          import boto3
+
+          s3 = boto3.client("s3")
+
+
+          def get_required_env(name):
+              value = os.environ.get(name)
+              if not value:
+                  raise RuntimeError(f"Missing required environment variable: {name}")
+              return value
+
+
+          def read_s3_json(bucket, key):
+              response = s3.get_object(Bucket=bucket, Key=key)
+              body = response["Body"].read().decode("utf-8")
+              return json.loads(body)
+
+
+          def build_prompt(incident):
+              compact = {
+                  "project": incident.get("project"),
+                  "environment": incident.get("environment"),
+                  "received_at": incident.get("received_at"),
+                  "source": incident.get("source"),
+                  "detail_type": incident.get("detail_type"),
+                  "alarm_name": incident.get("alarm_name"),
+                  "new_state": incident.get("new_state"),
+                  "region": incident.get("region"),
+                  "account": incident.get("account"),
+              }
+
+              raw_event = incident.get("raw_event", {})
+              detail = raw_event.get("detail", {})
+              state = detail.get("state", {})
+              previous_state = detail.get("previousState", {})
+              configuration = detail.get("configuration", {})
+
+              compact["state_reason"] = state.get("reason")
+              compact["previous_state"] = previous_state.get("value")
+              compact["previous_state_reason"] = previous_state.get("reason")
+              compact["alarm_configuration"] = configuration
+
+              incident_json = json.dumps(compact, ensure_ascii=False, indent=2)
+
+              return f"""
+          You are an SRE assistant helping a cloud infrastructure operations team.
+
+          The following JSON is an incident event saved to S3 by a Lambda function.
+          The original event came from an AWS CloudWatch Alarm state change.
+
+          This incident may be one of the following:
+          - ALB Target 5XX increase for a Public Web App running on AWS ECS Fargate.
+          - Hybrid connectivity failure where the ECS Public Web App failed to call the on-prem Internal Ops API.
+
+          Please write an incident summary report in Markdown.
+
+          Rules:
+          - Separate facts confirmed by the JSON from reasonable assumptions.
+          - Do not overstate certainty.
+          - Describe possible causes as hypotheses, not confirmed root causes.
+          - Do not claim that remediation has already been completed.
+          - Include a practical first-response checklist for an operator.
+          - Keep the report concise, structured, and suitable for a portfolio or operations document.
+
+          Output format:
+
+          # LLM Incident Summary
+
+          ## 1. Incident Overview
+          ## 2. Detection Evidence
+          ## 3. Estimated Impact
+          ## 4. Possible Causes
+          ## 5. First Response Checklist
+          ## 6. Draft Response Procedure
+          ## 7. Draft Incident Report
+          ## 8. Prevention and Improvement Items
+
+          Incident event JSON:
+          ```json
+          {incident_json}
+          ```
+          """.strip()
+
+
+          def call_openai(prompt):
+              api_key = get_required_env("OPENAI_API_KEY")
+              model = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+
+              payload = {
+                  "model": model,
+                  "input": prompt
+              }
+
+              request = urllib.request.Request(
+                  "https://api.openai.com/v1/responses",
+                  data=json.dumps(payload).encode("utf-8"),
+                  headers={
+                      "Content-Type": "application/json",
+                      "Authorization": f"Bearer {api_key}",
+                  },
+                  method="POST",
+              )
+
+              with urllib.request.urlopen(request, timeout=45) as response:
+                  response_body = response.read().decode("utf-8")
+                  data = json.loads(response_body)
+
+              output_text = data.get("output_text")
+              if output_text:
+                  return output_text
+
+              parts = []
+              for item in data.get("output", []):
+                  for content in item.get("content", []):
+                      if content.get("type") in ("output_text", "text"):
+                          parts.append(content.get("text", ""))
+
+              if parts:
+                  return "\n".join(parts)
+
+              return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+          def build_output_key(input_key):
+              output_prefix = os.environ.get("SUMMARY_OUTPUT_PREFIX", "summaries/")
+              filename = input_key.split("/")[-1].replace(".json", ".md")
+
+              now = datetime.now(timezone.utc)
+              date_prefix = now.strftime("%Y/%m/%d")
+
+              return f"{output_prefix}{date_prefix}/{filename}"
+
+
+          def handler(event, context):
+              print(json.dumps(event))
+
+              records = event.get("Records", [])
+              if not records:
+                  return {"statusCode": 400, "body": "No S3 records found"}
+
+              created = []
+
+              for record in records:
+                  bucket = record["s3"]["bucket"]["name"]
+                  key = urllib.parse.unquote_plus(record["s3"]["object"]["key"])
+
+                  if not key.startswith("incidents/") or not key.endswith(".json"):
+                      print(f"Skipped non-incident object: {key}")
+                      continue
+
+                  incident = read_s3_json(bucket, key)
+                  prompt = build_prompt(incident)
+                  summary = call_openai(prompt)
+
+                  generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                  output_key = build_output_key(key)
+
+                  body = f"""<!--
+          Generated at: {generated_at}
+          Source bucket: {bucket}
+          Source key: {key}
+          -->
+
+          {summary}
+          """
+
+                  s3.put_object(
+                      Bucket=bucket,
+                      Key=output_key,
+                      Body=body.encode("utf-8"),
+                      ContentType="text/markdown"
+                  )
+
+                  created.append(output_key)
+                  print(f"Created summary: s3://{bucket}/{output_key}")
+
+              return {
+                  "statusCode": 200,
+                  "body": json.dumps({"created": created}, ensure_ascii=False)
+              }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ------------------------------------------------------------
+  # CloudWatch Logs Metric Filter - Internal Ops API call failure
+  # ------------------------------------------------------------
+  InternalOpsApiFailureMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Ref PublicWebLogGroupName
+      FilterPattern: '"Internal Ops API call failed"'
+      MetricTransformations:
+        - MetricNamespace: !Sub "${ProjectName}/${EnvironmentName}/PublicWebApp"
+          MetricName: InternalOpsApiCallFailureCount
+          MetricValue: "1"
+          Unit: Count
+
+  # ------------------------------------------------------------
+  # CloudWatch Alarm - ALB Target 5XX
+  # ------------------------------------------------------------
+  AlbTarget5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-${EnvironmentName}-alb-target-5xx-alarm"
+      AlarmDescription: !Sub >
+        Alarm when ALB target 5XX count is greater than or equal to ${AlarmThreshold}
+        within ${AlarmPeriodSeconds} seconds.
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Statistic: Sum
+      Period: !Ref AlarmPeriodSeconds
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: !Ref AlarmThreshold
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Ref AlbFullName
+        - Name: TargetGroup
+          Value: !Ref TargetGroupFullName
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ------------------------------------------------------------
+  # CloudWatch Alarm - Hybrid Internal Ops API call failure
+  # ------------------------------------------------------------
+  InternalOpsApiFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-${EnvironmentName}-internal-ops-api-failure-alarm"
+      AlarmDescription: >
+        Alarm when the ECS Public Web App fails to call the on-prem Internal Ops API.
+      Namespace: !Sub "${ProjectName}/${EnvironmentName}/PublicWebApp"
+      MetricName: InternalOpsApiCallFailureCount
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+  # ------------------------------------------------------------
+  # EventBridge Rule - CloudWatch Alarm state change to ALARM
+  # ------------------------------------------------------------
+  AlarmStateChangeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-${EnvironmentName}-alarm-state-change-rule"
+      Description: Invoke Lambda when one of the incident alarms enters ALARM state.
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.cloudwatch
+        detail-type:
+          - CloudWatch Alarm State Change
+        detail:
+          alarmName:
+            - !Ref AlbTarget5xxAlarm
+            - !Ref InternalOpsApiFailureAlarm
+          state:
+            value:
+              - ALARM
+      Targets:
+        - Arn: !GetAtt IncidentEventHandlerFunction.Arn
+          Id: IncidentEventHandlerTarget
+
+  LambdaInvokePermissionForEventBridge:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IncidentEventHandlerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AlarmStateChangeRule.Arn
+
+Outputs:
+  IncidentArchiveBucketName:
+    Description: S3 bucket name for archived incident events and generated summaries.
+    Value: !Ref IncidentArchiveBucket
+
+  IncidentEventLambdaFunctionName:
+    Description: Lambda function name for incident event archiving.
+    Value: !Ref IncidentEventHandlerFunction
+
+  IncidentSummaryLambdaFunctionName:
+    Description: Lambda function name for LLM incident summary generation.
+    Value: !Ref IncidentSummaryFunction
+
+  AlbTarget5xxAlarmName:
+    Description: CloudWatch alarm name for ALB target 5XX errors.
+    Value: !Ref AlbTarget5xxAlarm
+
+  InternalOpsApiFailureAlarmName:
+    Description: CloudWatch alarm name for Internal Ops API call failures.
+    Value: !Ref InternalOpsApiFailureAlarm
+
+  InternalOpsApiFailureMetricName:
+    Description: Custom metric name for Internal Ops API call failures.
+    Value: InternalOpsApiCallFailureCount
+
+  EventBridgeRuleName:
+    Description: EventBridge rule name.
+    Value: !Ref AlarmStateChangeRule
+
+  IncidentInputPrefix:
+    Description: S3 prefix where incident JSON files are stored.
+    Value: incidents/
+
+  SummaryOutputPrefix:
+    Description: S3 prefix where LLM incident summaries are stored.
+    Value: summaries/

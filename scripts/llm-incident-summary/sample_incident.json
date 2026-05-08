@@ -1,0 +1,59 @@
+{
+  "project": "hybrid-ops",
+  "environment": "dev",
+  "received_at": "2026-05-08T06:46:59Z",
+  "source": "aws.cloudwatch",
+  "detail_type": "CloudWatch Alarm State Change",
+  "alarm_name": "hybrid-ops-dev-alb-target-5xx-alarm",
+  "new_state": "ALARM",
+  "region": "ap-northeast-2",
+  "account": "235494777610",
+  "raw_event": {
+    "version": "0",
+    "id": "a249e71e-ea83-515d-4ea9-2d1af1d17e6f",
+    "detail-type": "CloudWatch Alarm State Change",
+    "source": "aws.cloudwatch",
+    "account": "235494777610",
+    "time": "2026-05-08T06:46:58Z",
+    "region": "ap-northeast-2",
+    "resources": [
+      "arn:aws:cloudwatch:ap-northeast-2:235494777610:alarm:hybrid-ops-dev-alb-target-5xx-alarm"
+    ],
+    "detail": {
+      "alarmName": "hybrid-ops-dev-alb-target-5xx-alarm",
+      "state": {
+        "value": "ALARM",
+        "reason": "Threshold Crossed: 1 out of the last 1 datapoints [3.0 (08/05/26 06:43:00)] was greater than or equal to the threshold (1.0) (minimum 1 datapoint for OK -> ALARM transition).",
+        "reasonData": "{\"version\":\"1.0\",\"queryDate\":\"2026-05-08T06:46:58.668+0000\",\"startDate\":\"2026-05-08T06:43:00.000+0000\",\"statistic\":\"Sum\",\"period\":60,\"recentDatapoints\":[3.0],\"threshold\":1.0,\"evaluatedDatapoints\":[{\"timestamp\":\"2026-05-08T06:43:00.000+0000\",\"sampleCount\":3.0,\"value\":3.0}]}",
+        "timestamp": "2026-05-08T06:46:58.670+0000"
+      },
+      "previousState": {
+        "value": "OK",
+        "reason": "Threshold Crossed: no datapoints were received for 1 period and 1 missing datapoint was treated as [NonBreaching].",
+        "reasonData": "{\"version\":\"1.0\",\"queryDate\":\"2026-05-08T06:37:58.664+0000\",\"statistic\":\"Sum\",\"period\":60,\"recentDatapoints\":[],\"threshold\":1.0,\"evaluatedDatapoints\":[{\"timestamp\":\"2026-05-08T06:34:00.000+0000\"}]}",
+        "timestamp": "2026-05-08T06:37:58.667+0000"
+      },
+      "configuration": {
+        "metrics": [
+          {
+            "id": "c2cf0327-258b-43f4-a25f-947eea6cf2be",
+            "metricStat": {
+              "metric": {
+                "namespace": "AWS/ApplicationELB",
+                "name": "HTTPCode_Target_5XX_Count",
+                "dimensions": {
+                  "TargetGroup": "targetgroup/hybrid-ops-dev-tg/ac84f9dac5628364",
+                  "LoadBalancer": "app/hybrid-ops-dev-alb/8c7c1b91c105c350"
+                }
+              },
+              "period": 60,
+              "stat": "Sum"
+            },
+            "returnData": true
+          }
+        ],
+        "description": "Alarm when ALB target 5XX count is greater than or equal to 1 within 60 seconds.\n"
+      }
+    }
+  }
+}

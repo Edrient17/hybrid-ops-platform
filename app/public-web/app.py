@@ -4,6 +4,7 @@ import os
 import time
 import socket
 import math
+import requests
 
 app = Flask(__name__)
 
@@ -50,12 +51,38 @@ def version():
 
 @app.route("/status/internal")
 def status_internal():
-    return jsonify({
-        "service": SERVICE_NAME,
-        "internal_ops_api_url": INTERNAL_OPS_API_URL,
-        "message": "Internal Ops API integration placeholder",
-        "status": "not_connected_yet"
-    })
+    if INTERNAL_OPS_API_URL == "not-configured":
+        return jsonify({
+            "service": SERVICE_NAME,
+            "status": "not_configured",
+            "message": "INTERNAL_OPS_API_URL is not configured"
+        }), 503
+
+    try:
+        response = requests.get(
+            f"{INTERNAL_OPS_API_URL}/ops/health",
+            timeout=3,
+            headers={
+                "ngrok-skip-browser-warning": "true"
+            }
+        )
+
+        return jsonify({
+            "service": SERVICE_NAME,
+            "status": "connected",
+            "internal_ops_api_url": INTERNAL_OPS_API_URL,
+            "internal_status_code": response.status_code,
+            "internal_response": response.json()
+        }), response.status_code
+
+    except Exception as e:
+        app.logger.error(f"Internal Ops API call failed: {str(e)}")
+        return jsonify({
+            "service": SERVICE_NAME,
+            "status": "internal_api_error",
+            "internal_ops_api_url": INTERNAL_OPS_API_URL,
+            "error": str(e)
+        }), 502
 
 
 @app.route("/error")

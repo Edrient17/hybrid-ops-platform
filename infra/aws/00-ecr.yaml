@@ -1,0 +1,38 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: Hybrid Ops Platform - ECR repository for Public Web App.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: hybrid-ops
+
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - prod
+
+Resources:
+  PublicWebEcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${ProjectName}-${EnvironmentName}-public-web-app"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      ImageTagMutability: MUTABLE
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Environment
+          Value: !Ref EnvironmentName
+
+Outputs:
+  EcrRepositoryName:
+    Description: ECR repository name.
+    Value: !Ref PublicWebEcrRepository
+
+  EcrRepositoryUri:
+    Description: ECR repository URI.
+    Value: !GetAtt PublicWebEcrRepository.RepositoryUri
