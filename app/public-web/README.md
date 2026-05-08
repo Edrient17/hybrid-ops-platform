@@ -19,3 +19,19 @@ AWS ECS Fargate에 배포할 외부 공개용 Flask 웹 애플리케이션
 ```bash
 pip install -r requirements.txt
 python app.py
+```
+
+## Docker Run
+```
+docker build -t public-web-app:v0.1.0 .
+docker run -p 5000:5000 public-web-app:v0.1.0
+```
+
+## Test
+```
+curl http://localhost:5000/health
+curl http://localhost:5000/version
+curl http://localhost:5000/error
+curl "http://localhost:5000/slow?delay=3"
+curl http://localhost:5000/stress
+```
