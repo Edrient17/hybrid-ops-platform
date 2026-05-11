@@ -20,6 +20,7 @@ def index():
         "message": "Public Web App running on AWS ECS",
         "version": APP_VERSION,
         "hostname": socket.gethostname(),
+        "server_time": datetime.utcnow().isoformat() + "Z",
         "endpoints": [
             "/health",
             "/version",
